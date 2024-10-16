@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Detector de Billetes</string>
+    <string name="title_activity_status">StatusActivity</string>
+    <string name="title_activity_ttsactivity">TTSActivity</string>
+</resources>
