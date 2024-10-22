@@ -5,6 +5,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.app.VoiceInteractor
 import android.content.Context
 import android.content.Intent
 import android.hardware.Sensor
@@ -16,12 +17,26 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlin.math.sqrt
-
+import android.media.MediaPlayer
+import java.io.File
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.speech.tts.TextToSpeech
+import okhttp3.OkHttpClient
+import java.io.IOException
+import okhttp3.Request
+
+import okhttp3.*
+import android.os.Handler
+import android.os.Looper
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+
+import org.json.JSONObject
+
+
 
 import java.util.Locale
+
 
 
 class ShakeService : Service(), SensorEventListener, TextToSpeech.OnInitListener {
@@ -30,8 +45,12 @@ class ShakeService : Service(), SensorEventListener, TextToSpeech.OnInitListener
     private var accelerometer: Sensor? = null
     private var shakeThreshold = 25f
     private var lastShakeTime: Long = 0
-    private var textToSpeech: TextToSpeech? = null
     private var vibrator: Vibrator? = null
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val serviceTimeout = 10000L // Tiempo para cerrar el servicio (10 segundos)
+
+    private var isActionPerformed = false // Variable para asegurarnos de que la acción solo ocurra una vez
 
     private val CHANNEL_ID = "ShakeServiceChannel"
 
@@ -50,16 +69,13 @@ class ShakeService : Service(), SensorEventListener, TextToSpeech.OnInitListener
             Log.d("ShakeService", "Accelerometer registered")
         }
 
-        // Initialize TextToSpeech
-        textToSpeech = TextToSpeech(this, this)
-
         // Initialize Vibrator
         vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d("ShakeService", "Service started")
-        return START_STICKY
+        return START_STICKY // Mantener el servicio activo incluso después de que Android lo destruye
     }
 
     private fun buildNotification(): Notification {
@@ -100,44 +116,104 @@ class ShakeService : Service(), SensorEventListener, TextToSpeech.OnInitListener
             val gForce = sqrt((x * x + y * y + z * z).toDouble()).toFloat()
             Log.d("ShakeService", "Sensor changed: gForce = $gForce")
 
-            if (gForce > shakeThreshold) {
+            // Detectar si la sacudida supera el umbral
+            if (gForce > shakeThreshold && !isActionPerformed) { // Solo ejecuta si no se ha ejecutado antes
                 val currentTime = System.currentTimeMillis()
                 if (currentTime - lastShakeTime > 1000) {
                     lastShakeTime = currentTime
                     Log.d("ShakeService", "Shake detected")
-                    vibrateAndSpeak()
+
+                    isActionPerformed = true // Marcar que la acción ha sido realizada
+                    vibrateAndSpeak() // Ejecutar la acción de vibración y reproducción de audio
+                    scheduleServiceStop() // Programar el cierre del servicio en 10 segundos
                 }
             }
         }
     }
 
+    private fun scheduleServiceStop() {
+        handler.postDelayed({
+            stopSelf() // Cerrar el servicio después de 10 segundos
+            Log.d("ShakeService", "Service stopped after 10 seconds")
+        }, serviceTimeout)
+    }
+
     private fun vibrateAndSpeak() {
-        // Vibrar por 500 milisegundos
+        // Vibrar por 500 milisegundos y luego enviar el texto a la API
         val vibrationDuration = 500L // Duración de la vibración en milisegundos
         vibrator?.let {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                // Vibración para Android Oreo (API 26) y versiones superiores
                 it.vibrate(VibrationEffect.createOneShot(vibrationDuration, VibrationEffect.DEFAULT_AMPLITUDE))
             } else {
-                // Vibración para versiones anteriores
                 @Suppress("DEPRECATION")
                 it.vibrate(vibrationDuration)
             }
         }
-        // Esperar un poco para asegurarnos de que la vibración termine antes de hablar
-        android.os.Handler().postDelayed({
-            speakWelcomeMessage()
+
+        val apiUrl = "http://192.168.0.2:5000/text"
+        val text = "Hola, Bienvenido que puedo hacer por usted"
+        Handler(Looper.getMainLooper()).postDelayed({
+            sendTextAndReceiveAudio(apiUrl, text)
         }, vibrationDuration)
     }
 
+    // Cliente OkHttp
+    val client = OkHttpClient()
 
-    private fun speakWelcomeMessage() {
-        textToSpeech?.let {
-            if (it.isSpeaking) {
-                it.stop()
+    // Función para enviar texto, recibir audio y reproducirlo
+    private fun sendTextAndReceiveAudio(apiUrl: String, text: String) {
+        // Crear el cuerpo de la solicitud POST con el texto en formato JSON
+        val jsonData = JSONObject().apply {
+            put("text", text) // Aquí se agrega el texto como parte del JSON
+        }.toString()
+
+        // Usar toMediaTypeOrNull() en lugar de parse() para el tipo de contenido
+        val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaTypeOrNull(), jsonData)
+
+        // Construir la solicitud POST
+        val request = Request.Builder()
+            .url(apiUrl)
+            .post(requestBody) // Añadir el cuerpo JSON a la solicitud POST
+            .build()
+
+        // Ejecutar la solicitud
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                e.printStackTrace() // Manejar error
             }
-            it.speak("Bienvenido que puedo hacer por usted", TextToSpeech.QUEUE_FLUSH, null, null)
+
+            override fun onResponse(call: Call, response: Response) {
+                if (response.isSuccessful) {
+                    response.body?.let { responseBody ->
+                        // Crear un archivo temporal para guardar el audio MP3
+                        val tempFile = File.createTempFile("output", ".mp3", cacheDir)
+
+                        // Guardar la respuesta (audio) en el archivo
+                        tempFile.outputStream().use { output ->
+                            responseBody.byteStream().copyTo(output)
+                        }
+
+                        // Reproducir el archivo de audio guardado
+                        Handler(Looper.getMainLooper()).post {
+                            playAudio(tempFile)
+                        }
+                    }
+                } else {
+                    // Manejar error en la respuesta
+                    println("Error: ${response.code}")
+                }
+            }
+        })
+    }
+
+    // Función para reproducir el archivo de audio
+    fun playAudio(audioFile: File) {
+        val mediaPlayer = MediaPlayer().apply {
+            setDataSource(audioFile.path)
+            prepare()
+            start()
         }
+        mediaPlayer.setOnCompletionListener { it.release() }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -146,21 +222,11 @@ class ShakeService : Service(), SensorEventListener, TextToSpeech.OnInitListener
         super.onDestroy()
         Log.d("ShakeService", "Service Destroyed")
         sensorManager.unregisterListener(this)
-        textToSpeech?.stop()
-        textToSpeech?.shutdown()
         vibrator = null
+        handler.removeCallbacksAndMessages(null) // Eliminar todos los temporizadores al destruir el servicio
     }
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val langResult = textToSpeech?.setLanguage(Locale.getDefault())
-            if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-                Log.e("ShakeService", "Language is not supported or missing data")
-            }
-        } else {
-            Log.e("ShakeService", "TextToSpeech initialization failed")
-        }
-    }
+    override fun onInit(status: Int) {}
 
     override fun onBind(intent: Intent?): IBinder? = null
 }

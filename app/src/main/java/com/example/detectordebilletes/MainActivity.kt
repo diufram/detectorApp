@@ -16,12 +16,11 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private val PERMISSION_REQUEST_CODE = 1
     private val LOCATION_PERMISSION_REQUEST_CODE = 2
-    private lateinit var textToSpeech: TextToSpeech
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        textToSpeech = TextToSpeech(this, this)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             Log.d("MainActivity", "Checking permissions for foreground service and location.")
@@ -96,20 +95,18 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         if (status == TextToSpeech.SUCCESS) {
             // El servicio de TextToSpeech se inicializó correctamente
             Log.d("MainActivity", "TextToSpeech initialized.")
-            speakWelcomeMessage()
         } else {
             Log.e("MainActivity", "Failed to initialize TextToSpeech.")
         }
     }
 
-    private fun speakWelcomeMessage() {
-        val welcomeMessage = "Bienvenido que puedo hacer por usted"
-        textToSpeech.speak(welcomeMessage, TextToSpeech.QUEUE_FLUSH, null, null)
-    }
+
 
     override fun onDestroy() {
         super.onDestroy()
-        textToSpeech.stop()
-        textToSpeech.shutdown()
+
     }
+
+
+
 }
